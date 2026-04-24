@@ -2,7 +2,24 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 
 const STORAGE_KEY = 'math-dungeon-v1';
+const PREFS_KEY = 'math-dungeon-prefs-v1';
+const APP_VERSION = '0.2.0';
 const MAX_PLAYER_HP = 5;
+
+const DIFFICULTY_PRESETS = [
+  { id: 'easy', name: 'Easy', hint: '+ up to 5', ops: ['+'], maxNumber: 5 },
+  { id: 'medium', name: 'Medium', hint: '+ − up to 10', ops: ['+', '-'], maxNumber: 10 },
+  { id: 'hard', name: 'Hard', hint: '+ − up to 20', ops: ['+', '-'], maxNumber: 20 },
+  { id: 'challenging', name: 'Challenging', hint: '+ − × up to 12', ops: ['+', '-', '×'], maxNumber: 12 },
+  { id: 'expert', name: 'Expert', hint: 'all ops up to 20', ops: ['+', '-', '×', '÷'], maxNumber: 20 },
+];
+
+const DEFAULT_PREFS = {
+  difficulty: 'hard',
+  gender: 'neutral',
+};
+
+const getDifficulty = (id) => DIFFICULTY_PRESETS.find((d) => d.id === id) || DIFFICULTY_PRESETS[2];
 
 const COLORS = [
   { id: 'red', name: 'Red', value: '#ef4444' },
@@ -274,35 +291,47 @@ const makeRewardItem = (id, defeatedEnemy) => {
   };
 };
 
-const genQuestion = () => {
-  const isAdd = Math.random() > 0.5;
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+const genQuestion = (settings = DIFFICULTY_PRESETS[2]) => {
+  const ops = settings.ops?.length ? settings.ops : ['+'];
+  const max = Math.max(2, settings.maxNumber || 20);
+  const op = ops[Math.floor(Math.random() * ops.length)];
+
   let a;
   let b;
   let answer;
 
-  if (isAdd) {
-    a = Math.floor(Math.random() * 14) + 1;
-    b = Math.floor(Math.random() * (19 - a)) + 1;
+  if (op === '+') {
+    a = randInt(1, Math.max(1, max - 1));
+    b = randInt(1, max - a);
     answer = a + b;
-  } else {
-    a = Math.floor(Math.random() * 18) + 2;
-    b = Math.floor(Math.random() * (a - 1)) + 1;
+  } else if (op === '-') {
+    a = randInt(2, max);
+    b = randInt(1, a - 1);
     answer = a - b;
+  } else if (op === '×') {
+    a = randInt(2, Math.min(max, 12));
+    b = randInt(2, Math.min(max, 12));
+    answer = a * b;
+  } else {
+    b = randInt(2, Math.min(max, 12));
+    answer = randInt(1, Math.min(max, 12));
+    a = answer * b;
   }
 
+  const answerCap = Math.max(answer + 6, max, 20);
   const opts = new Set([answer]);
   while (opts.size < 4) {
-    const offset = Math.floor(Math.random() * 7) - 3;
-    const wrongAnswer = answer + offset;
-    if (wrongAnswer >= 0 && wrongAnswer <= 20 && wrongAnswer !== answer) {
-      opts.add(wrongAnswer);
-    }
+    const offset = randInt(-Math.min(4, answer), 4);
+    const wrong = answer + offset;
+    if (wrong >= 0 && wrong <= answerCap && wrong !== answer) opts.add(wrong);
   }
 
   return {
     a,
     b,
-    op: isAdd ? '+' : '−',
+    op: op === '-' ? '−' : op,
     answer,
     options: [...opts].sort(() => Math.random() - 0.5),
   };
@@ -866,7 +895,30 @@ const StarterPants = () => (
   </g>
 );
 
-const Avatar = ({ equipped = {}, animClass = '', expression = 'normal', viewBox = '0 0 240 360' }) => {
+const HairStyle = ({ gender }) => {
+  const hair = '#5b3a1e';
+  const hairD = '#3d2612';
+  if (gender === 'girl') {
+    return (
+      <g>
+        <path d="M 68 70 Q 68 50 120 50 Q 172 50 172 70 L 172 110 Q 162 78 120 78 Q 78 78 68 110 Z" fill={hair} stroke={hairD} strokeWidth="2" />
+        <path d="M 60 110 Q 58 150 66 190 L 80 190 L 80 125 Q 74 118 60 110 Z" fill={hair} stroke={hairD} strokeWidth="2" />
+        <path d="M 180 110 Q 182 150 174 190 L 160 190 L 160 125 Q 166 118 180 110 Z" fill={hair} stroke={hairD} strokeWidth="2" />
+        <circle cx="94" cy="56" r="5" fill="#fb7185" stroke={hairD} strokeWidth="1.5" />
+      </g>
+    );
+  }
+  if (gender === 'boy') {
+    return (
+      <g>
+        <path d="M 76 74 Q 78 54 120 52 Q 162 54 164 74 L 164 88 Q 156 74 120 74 Q 84 74 76 88 Z" fill={hair} stroke={hairD} strokeWidth="2" />
+      </g>
+    );
+  }
+  return null;
+};
+
+const Avatar = ({ equipped = {}, gender = 'neutral', animClass = '', expression = 'normal', viewBox = '0 0 240 360' }) => {
   const skin = '#f0c49a';
   const skinD = '#b8875f';
 
@@ -917,6 +969,8 @@ const Avatar = ({ equipped = {}, animClass = '', expression = 'normal', viewBox 
 
       <circle cx="90" cy="115" r="5" fill="#ff6b9d" opacity="0.3" />
       <circle cx="150" cy="115" r="5" fill="#ff6b9d" opacity="0.3" />
+
+      <HairStyle gender={gender} />
 
       {equipped.face && <FaceAccessory type={equipped.face.type} color={equipped.face.color} />}
       {equipped.hat && <Hat type={equipped.hat.type} color={equipped.hat.color} />}
@@ -1041,6 +1095,32 @@ export default function MathDungeon() {
 
   const [newItem, setNewItem] = useState(null);
   const [boxOpened, setBoxOpened] = useState(false);
+
+  const [prefs, setPrefs] = useState(DEFAULT_PREFS);
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      if (raw) setPrefs({ ...DEFAULT_PREFS, ...JSON.parse(raw) });
+    } catch {
+      // ignore corrupt prefs; fall back to defaults
+    }
+  }, []);
+
+  const updatePrefs = useCallback((patch) => {
+    setPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+      } catch {
+        // prefs are best-effort
+      }
+      return next;
+    });
+  }, []);
+
+  const difficulty = useMemo(() => getDifficulty(prefs.difficulty), [prefs.difficulty]);
 
   useEffect(() => {
     try {
@@ -1239,7 +1319,7 @@ export default function MathDungeon() {
     setEnemy({ ...e });
     setEnemyMaxHp(e.hp);
     setPlayerHp(MAX_PLAYER_HP);
-    setQuestion(genQuestion());
+    setQuestion(genQuestion(difficulty));
     setSelected(null);
     setFeedback(null);
     setMode('battle');
@@ -1273,7 +1353,7 @@ export default function MathDungeon() {
               setMode('reward');
             }, 400);
           } else {
-            setQuestion(genQuestion());
+            setQuestion(genQuestion(difficulty));
             setSelected(null);
             setFeedback(null);
           }
@@ -1296,7 +1376,7 @@ export default function MathDungeon() {
           if (newHp <= 0) {
             setTimeout(() => setMode('gameover'), 400);
           } else {
-            setQuestion(genQuestion());
+            setQuestion(genQuestion(difficulty));
             setSelected(null);
             setFeedback(null);
           }
@@ -1384,10 +1464,13 @@ export default function MathDungeon() {
         {mode === 'home' && (
           <HomeScreen
             equipped={equipped}
+            gender={prefs.gender}
+            difficulty={difficulty}
             inventoryCount={inventory.length}
             authPanel={authPanel}
             onBattle={startBattle}
             onInventory={() => setMode('inventory')}
+            onOpenSettings={() => setShowSettings(true)}
           />
         )}
 
@@ -1400,6 +1483,7 @@ export default function MathDungeon() {
             selected={selected}
             feedback={feedback}
             equipped={equipped}
+            gender={prefs.gender}
             playerAnim={playerAnim}
             enemyAnim={enemyAnim}
             floatingText={floatingText}
@@ -1412,14 +1496,101 @@ export default function MathDungeon() {
         )}
 
         {mode === 'inventory' && (
-          <InventoryScreen inventory={inventory} equipped={equipped} onEquip={equipItem} onBack={() => setMode('home')} authPanel={authPanel} />
+          <InventoryScreen inventory={inventory} equipped={equipped} gender={prefs.gender} onEquip={equipItem} onBack={() => setMode('home')} authPanel={authPanel} />
         )}
 
         {mode === 'gameover' && <GameOverScreen onRetry={startBattle} onHome={() => setMode('home')} />}
+
+        {showSettings && (
+          <SettingsModal prefs={prefs} onChange={updatePrefs} onClose={() => setShowSettings(false)} />
+        )}
       </div>
     </>
   );
 }
+
+const SettingsModal = ({ prefs, onChange, onClose }) => {
+  const genderOptions = [
+    { id: 'neutral', label: 'Default', emoji: '🧑' },
+    { id: 'boy', label: 'Boy', emoji: '👦' },
+    { id: 'girl', label: 'Girl', emoji: '👧' },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-3xl border-2 border-white/20 bg-slate-900 p-5 text-white shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="title-font text-2xl">Settings</h2>
+          <button
+            onClick={onClose}
+            className="rounded-full bg-white/15 px-3 py-1 text-sm font-bold active:scale-95"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mb-5">
+          <div className="mb-2 text-sm font-bold text-white/80">Hero look</div>
+          <div className="grid grid-cols-3 gap-2">
+            {genderOptions.map((option) => {
+              const active = prefs.gender === option.id;
+              return (
+                <button
+                  key={option.id}
+                  onClick={() => onChange({ gender: option.id })}
+                  className="flex flex-col items-center gap-1 rounded-xl border-2 p-2 transition-all active:scale-95"
+                  style={{
+                    background: active ? 'rgba(250, 204, 21, 0.18)' : 'rgba(255,255,255,0.05)',
+                    borderColor: active ? '#facc15' : 'rgba(255,255,255,0.15)',
+                  }}
+                >
+                  <span className="text-2xl">{option.emoji}</span>
+                  <span className="text-xs font-bold">{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-2 text-sm font-bold text-white/80">Math difficulty</div>
+          <div className="grid gap-2">
+            {DIFFICULTY_PRESETS.map((level) => {
+              const active = prefs.difficulty === level.id;
+              return (
+                <button
+                  key={level.id}
+                  onClick={() => onChange({ difficulty: level.id })}
+                  className="flex items-center justify-between rounded-xl border-2 px-3 py-2 text-left transition-all active:scale-[0.98]"
+                  style={{
+                    background: active ? 'rgba(250, 204, 21, 0.18)' : 'rgba(255,255,255,0.05)',
+                    borderColor: active ? '#facc15' : 'rgba(255,255,255,0.15)',
+                  }}
+                >
+                  <div>
+                    <div className="text-sm font-bold">{level.name}</div>
+                    <div className="text-xs text-white/60">{level.hint}</div>
+                  </div>
+                  {active && <span className="text-lg">✓</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <p className="mt-4 text-center text-[11px] text-white/45">
+          Preferences saved on this device · v{APP_VERSION}
+        </p>
+      </div>
+    </div>
+  );
+};
 
 const GameStyles = () => (
   <style>{`
@@ -1657,7 +1828,7 @@ const AuthPanel = ({ configured, user, authMessage, syncStatus, syncMessage, onR
   );
 };
 
-const HomeScreen = ({ equipped, inventoryCount, authPanel, onBattle, onInventory }) => (
+const HomeScreen = ({ equipped, gender, inventoryCount, authPanel, difficulty, onBattle, onInventory, onOpenSettings }) => (
   <div className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-6xl flex-col px-4 py-4 pb-6 sm:px-6">
     <div className="ml-auto w-full max-w-sm">{authPanel}</div>
 
@@ -1685,7 +1856,7 @@ const HomeScreen = ({ equipped, inventoryCount, authPanel, onBattle, onInventory
             className="absolute -bottom-2 left-1/2 h-5 w-36 -translate-x-1/2 rounded-full"
             style={{ background: 'radial-gradient(ellipse, rgba(0,0,0,0.42), transparent 70%)' }}
           />
-          <Avatar equipped={equipped} expression="happy" />
+          <Avatar equipped={equipped} gender={gender} expression="happy" />
         </div>
 
         <div className="grid w-full max-w-sm gap-4">
@@ -1696,14 +1867,24 @@ const HomeScreen = ({ equipped, inventoryCount, authPanel, onBattle, onInventory
           >
             ⚔️ Enter Dungeon
           </button>
-          <button
-            onClick={onInventory}
-            className="chunky-btn flex items-center justify-center gap-3 rounded-2xl py-4 text-xl text-white title-font"
-            style={{ background: 'linear-gradient(135deg, #7c3aed, #2563eb)' }}
-          >
-            🎒 Inventory
-            {inventoryCount > 0 && <span className="rounded-full bg-yellow-300 px-2.5 py-0.5 text-sm text-yellow-950">{inventoryCount}</span>}
-          </button>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={onInventory}
+              className="chunky-btn flex items-center justify-center gap-2 rounded-2xl py-4 text-base text-white title-font"
+              style={{ background: 'linear-gradient(135deg, #7c3aed, #2563eb)' }}
+            >
+              🎒 Inventory
+              {inventoryCount > 0 && <span className="rounded-full bg-yellow-300 px-2 py-0.5 text-xs text-yellow-950">{inventoryCount}</span>}
+            </button>
+            <button
+              onClick={onOpenSettings}
+              className="chunky-btn flex flex-col items-center justify-center gap-0.5 rounded-2xl py-3 text-white title-font"
+              style={{ background: 'linear-gradient(135deg, #0ea5e9, #14b8a6)' }}
+            >
+              <span className="text-base">⚙️ Settings</span>
+              <span className="text-[11px] font-normal opacity-80">{difficulty.name} · {difficulty.hint}</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -1731,6 +1912,7 @@ const HomeScreen = ({ equipped, inventoryCount, authPanel, onBattle, onInventory
         <LootTeaser slot="tool" type="wand" color="pink" title="Magic Wand" />
       </section>
     </main>
+    <div className="mt-2 text-center text-[10px] text-white/40">Math Dungeon v{APP_VERSION}</div>
   </div>
 );
 
@@ -1754,6 +1936,7 @@ const BattleScreen = ({
   selected,
   feedback,
   equipped,
+  gender,
   playerAnim,
   enemyAnim,
   floatingText,
@@ -1795,7 +1978,7 @@ const BattleScreen = ({
       <div className="relative mb-4 flex min-h-[220px] items-end justify-between gap-2 sm:min-h-[280px]">
         <div className="relative w-28 flex-shrink-0 sm:w-40">
           <div className={`${playerAnim === 'attack' ? 'avatar-attack' : ''} ${playerAnim === 'hurt' ? 'avatar-hurt' : ''}`}>
-            <Avatar equipped={equipped} expression={playerAnim === 'hurt' ? 'hurt' : 'normal'} />
+            <Avatar equipped={equipped} gender={gender} expression={playerAnim === 'hurt' ? 'hurt' : 'normal'} />
           </div>
           {floatingText?.on === 'player' && (
             <FloatingText text={floatingText.text} color={floatingText.color} />
@@ -2003,7 +2186,7 @@ const RewardScreen = ({ item, opened, onOpen, onClaim }) => {
   );
 };
 
-const InventoryScreen = ({ inventory, equipped, onEquip, onBack, authPanel }) => {
+const InventoryScreen = ({ inventory, equipped, gender, onEquip, onBack, authPanel }) => {
   const [activeSlot, setActiveSlot] = useState('hat');
   const [activeRarity, setActiveRarity] = useState('all');
 
@@ -2041,7 +2224,7 @@ const InventoryScreen = ({ inventory, equipped, onEquip, onBack, authPanel }) =>
         <div className="rounded-3xl border-2 border-white/20 bg-black/30 p-4 backdrop-blur">
           <h3 className="title-font mb-2 text-center text-xl text-white">Your Hero</h3>
           <div className="mx-auto mb-3 h-72 w-48">
-            <Avatar equipped={equipped} expression="happy" />
+            <Avatar equipped={equipped} gender={gender} expression="happy" />
           </div>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {SLOT_ORDER.map((slot) => (
