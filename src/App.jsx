@@ -6,20 +6,61 @@ const PREFS_KEY = 'math-dungeon-prefs-v1';
 const APP_VERSION = '0.2.0';
 const MAX_PLAYER_HP = 5;
 
-const DIFFICULTY_PRESETS = [
-  { id: 'easy', name: 'Easy', hint: '+ up to 5', ops: ['+'], maxNumber: 5 },
-  { id: 'medium', name: 'Medium', hint: '+ − up to 10', ops: ['+', '-'], maxNumber: 10 },
-  { id: 'hard', name: 'Hard', hint: '+ − up to 20', ops: ['+', '-'], maxNumber: 20 },
-  { id: 'challenging', name: 'Challenging', hint: '+ − × up to 12', ops: ['+', '-', '×'], maxNumber: 12 },
-  { id: 'expert', name: 'Expert', hint: 'all ops up to 20', ops: ['+', '-', '×', '÷'], maxNumber: 20 },
+const OP_OPTIONS = [
+  { id: '+', label: '+', name: 'Add' },
+  { id: '-', label: '−', name: 'Subtract' },
+  { id: '×', label: '×', name: 'Multiply' },
+  { id: '÷', label: '÷', name: 'Divide' },
 ];
 
+const DIFFICULTY_PRESETS = [
+  { id: 'easy', name: 'Easy', ops: ['+'], maxNumber: 5 },
+  { id: 'medium', name: 'Medium', ops: ['+', '-'], maxNumber: 10 },
+  { id: 'hard', name: 'Hard', ops: ['+', '-'], maxNumber: 20 },
+  { id: 'challenging', name: 'Challenging', ops: ['+', '-', '×'], maxNumber: 12 },
+  { id: 'expert', name: 'Expert', ops: ['+', '-', '×', '÷'], maxNumber: 20 },
+];
+
+const MIN_RANGE = 2;
+const MAX_RANGE = 100;
+
 const DEFAULT_PREFS = {
-  difficulty: 'hard',
   gender: 'neutral',
+  ops: ['+', '-'],
+  maxNumber: 20,
 };
 
-const getDifficulty = (id) => DIFFICULTY_PRESETS.find((d) => d.id === id) || DIFFICULTY_PRESETS[2];
+const sanitizeOps = (ops) => {
+  const allowed = new Set(OP_OPTIONS.map((option) => option.id));
+  const filtered = Array.isArray(ops) ? ops.filter((op) => allowed.has(op)) : [];
+  return filtered.length ? filtered : ['+'];
+};
+
+const clampRange = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_PREFS.maxNumber;
+  return Math.max(MIN_RANGE, Math.min(MAX_RANGE, Math.round(n)));
+};
+
+const normalizePrefs = (raw) => {
+  const legacyPreset = DIFFICULTY_PRESETS.find((preset) => preset.id === raw?.difficulty);
+  const base = legacyPreset ? { ops: legacyPreset.ops, maxNumber: legacyPreset.maxNumber } : {};
+  return {
+    gender: raw?.gender || DEFAULT_PREFS.gender,
+    ops: sanitizeOps(raw?.ops ?? base.ops ?? DEFAULT_PREFS.ops),
+    maxNumber: clampRange(raw?.maxNumber ?? base.maxNumber ?? DEFAULT_PREFS.maxNumber),
+  };
+};
+
+const matchPreset = (prefs) =>
+  DIFFICULTY_PRESETS.find(
+    (preset) =>
+      preset.maxNumber === prefs.maxNumber &&
+      preset.ops.length === prefs.ops.length &&
+      preset.ops.every((op) => prefs.ops.includes(op)),
+  );
+
+const formatOpsHint = (ops) => ops.map((op) => (op === '-' ? '−' : op)).join(' ');
 
 const COLORS = [
   { id: 'red', name: 'Red', value: '#ef4444' },
@@ -187,6 +228,23 @@ const normalizeSave = (data) => ({
 const loadGame = () => {
   const saved = localStorage.getItem(STORAGE_KEY);
   return saved ? normalizeSave(JSON.parse(saved)) : DEFAULT_SAVE;
+};
+
+const loadPrefs = () => {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    return raw ? normalizePrefs(JSON.parse(raw)) : { ...DEFAULT_PREFS };
+  } catch {
+    return { ...DEFAULT_PREFS };
+  }
+};
+
+const savePrefs = (prefs) => {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // best-effort
+  }
 };
 
 const saveGame = (inventory, equipped, nextId) => {
@@ -981,6 +1039,15 @@ const Avatar = ({ equipped = {}, gender = 'neutral', animClass = '', expression 
   );
 };
 
+const RarityBadge = ({ rarity, className = '' }) => (
+  <div
+    className={`w-fit rounded-full px-2 py-0.5 text-[10px] font-bold text-slate-950 ${className}`}
+    style={{ background: rarity.accent }}
+  >
+    {rarity.name}
+  </div>
+);
+
 const ItemAvatar = ({ item, className = 'w-40 h-60' }) => (
   <div className={className}>
     <svg viewBox={getItemPreviewViewBox(item.slot)} className="h-full w-full" style={{ imageRendering: 'auto' }}>
@@ -1100,27 +1167,32 @@ export default function MathDungeon() {
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(PREFS_KEY);
-      if (raw) setPrefs({ ...DEFAULT_PREFS, ...JSON.parse(raw) });
-    } catch {
-      // ignore corrupt prefs; fall back to defaults
-    }
+    setPrefs(loadPrefs());
   }, []);
 
-  const updatePrefs = useCallback((patch) => {
-    setPrefs((prev) => {
-      const next = { ...prev, ...patch };
-      try {
-        localStorage.setItem(PREFS_KEY, JSON.stringify(next));
-      } catch {
-        // prefs are best-effort
-      }
-      return next;
-    });
-  }, []);
-
-  const difficulty = useMemo(() => getDifficulty(prefs.difficulty), [prefs.difficulty]);
+  const updatePrefs = useCallback(
+    (patch) => {
+      setPrefs((prev) => {
+        const next = normalizePrefs({ ...prev, ...patch });
+        if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
+        savePrefs(next);
+        if (supabase && user) {
+          supabase
+            .from('game_saves')
+            .update({ prefs: next })
+            .eq('user_id', user.id)
+            .then(({ error }) => {
+              if (error) {
+                setSyncStatus('error');
+                setSyncMessage(error.message);
+              }
+            });
+        }
+        return next;
+      });
+    },
+    [user],
+  );
 
   useEffect(() => {
     try {
@@ -1158,7 +1230,7 @@ export default function MathDungeon() {
   }, []);
 
   const save = useCallback(
-    (inv, eq, id) => {
+    (inv, eq, id, prefsToSave) => {
       try {
         saveGame(inv, eq, id);
       } catch {
@@ -1181,6 +1253,7 @@ export default function MathDungeon() {
             inventory: inv,
             equipped: eq,
             next_id: id,
+            prefs: prefsToSave,
           },
           { onConflict: 'user_id' },
         )
@@ -1214,7 +1287,7 @@ export default function MathDungeon() {
 
       const { data, error } = await supabase
         .from('game_saves')
-        .select('inventory,equipped,next_id')
+        .select('inventory,equipped,next_id,prefs')
         .eq('user_id', user.id)
         .maybeSingle();
 
@@ -1232,6 +1305,11 @@ export default function MathDungeon() {
         setEquipped(cloudSave.equipped);
         setNextId(cloudSave.nextId);
         saveGame(cloudSave.inventory, cloudSave.equipped, cloudSave.nextId);
+        if (data.prefs && Object.keys(data.prefs).length > 0) {
+          const cloudPrefs = normalizePrefs(data.prefs);
+          setPrefs(cloudPrefs);
+          savePrefs(cloudPrefs);
+        }
         setSyncStatus('saved');
         setSyncMessage('Cloud save loaded.');
         return;
@@ -1244,6 +1322,7 @@ export default function MathDungeon() {
           inventory: localSave.inventory,
           equipped: localSave.equipped,
           next_id: localSave.nextId,
+          prefs,
         },
         { onConflict: 'user_id' },
       );
@@ -1319,7 +1398,7 @@ export default function MathDungeon() {
     setEnemy({ ...e });
     setEnemyMaxHp(e.hp);
     setPlayerHp(MAX_PLAYER_HP);
-    setQuestion(genQuestion(difficulty));
+    setQuestion(genQuestion(prefs));
     setSelected(null);
     setFeedback(null);
     setMode('battle');
@@ -1353,7 +1432,7 @@ export default function MathDungeon() {
               setMode('reward');
             }, 400);
           } else {
-            setQuestion(genQuestion(difficulty));
+            setQuestion(genQuestion(prefs));
             setSelected(null);
             setFeedback(null);
           }
@@ -1376,7 +1455,7 @@ export default function MathDungeon() {
           if (newHp <= 0) {
             setTimeout(() => setMode('gameover'), 400);
           } else {
-            setQuestion(genQuestion(difficulty));
+            setQuestion(genQuestion(prefs));
             setSelected(null);
             setFeedback(null);
           }
@@ -1399,7 +1478,7 @@ export default function MathDungeon() {
     const updatedNextId = Math.max(nextId, newItem.id + 1);
     setInventory(updatedInventory);
     setNextId(updatedNextId);
-    save(updatedInventory, updatedEquipped, updatedNextId);
+    save(updatedInventory, updatedEquipped, updatedNextId, prefs);
     setNewItem(null);
     setMode('home');
   };
@@ -1416,7 +1495,7 @@ export default function MathDungeon() {
         : { ...equipped, [item.slot]: item };
 
     setEquipped(updated);
-    save(inventory, updated, nextId);
+    save(inventory, updated, nextId, prefs);
   };
 
   const authPanel = (
@@ -1464,8 +1543,7 @@ export default function MathDungeon() {
         {mode === 'home' && (
           <HomeScreen
             equipped={equipped}
-            gender={prefs.gender}
-            difficulty={difficulty}
+            prefs={prefs}
             inventoryCount={inventory.length}
             authPanel={authPanel}
             onBattle={startBattle}
@@ -1509,12 +1587,30 @@ export default function MathDungeon() {
   );
 }
 
+const pickerTileStyle = (active) => ({
+  background: active ? 'rgba(250, 204, 21, 0.18)' : 'rgba(255,255,255,0.05)',
+  borderColor: active ? '#facc15' : 'rgba(255,255,255,0.15)',
+});
+
+const GENDER_OPTIONS = [
+  { id: 'neutral', label: 'Default', emoji: '🧑' },
+  { id: 'boy', label: 'Boy', emoji: '👦' },
+  { id: 'girl', label: 'Girl', emoji: '👧' },
+];
+
 const SettingsModal = ({ prefs, onChange, onClose }) => {
-  const genderOptions = [
-    { id: 'neutral', label: 'Default', emoji: '🧑' },
-    { id: 'boy', label: 'Boy', emoji: '👦' },
-    { id: 'girl', label: 'Girl', emoji: '👧' },
-  ];
+  const activePreset = matchPreset(prefs);
+
+  const toggleOp = (opId) => {
+    const has = prefs.ops.includes(opId);
+    const next = has ? prefs.ops.filter((op) => op !== opId) : [...prefs.ops, opId];
+    if (!next.length) return;
+    onChange({ ops: next });
+  };
+
+  const applyPreset = (preset) => {
+    onChange({ ops: [...preset.ops], maxNumber: preset.maxNumber });
+  };
 
   return (
     <div
@@ -1525,7 +1621,7 @@ const SettingsModal = ({ prefs, onChange, onClose }) => {
         className="w-full max-w-md rounded-3xl border-2 border-white/20 bg-slate-900 p-5 text-white shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-4 flex items-center justify-between">
           <h2 className="title-font text-2xl">Settings</h2>
           <button
             onClick={onClose}
@@ -1538,55 +1634,96 @@ const SettingsModal = ({ prefs, onChange, onClose }) => {
         <div className="mb-5">
           <div className="mb-2 text-sm font-bold text-white/80">Hero look</div>
           <div className="grid grid-cols-3 gap-2">
-            {genderOptions.map((option) => {
-              const active = prefs.gender === option.id;
+            {GENDER_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                onClick={() => onChange({ gender: option.id })}
+                className="flex flex-col items-center gap-1 rounded-xl border-2 p-2 transition-all active:scale-95"
+                style={pickerTileStyle(prefs.gender === option.id)}
+              >
+                <span className="text-2xl">{option.emoji}</span>
+                <span className="text-xs font-bold">{option.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-5">
+          <div className="mb-2 text-sm font-bold text-white/80">Quick preset</div>
+          <div className="flex flex-wrap gap-2">
+            {DIFFICULTY_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => applyPreset(preset)}
+                className="rounded-full border-2 px-3 py-1 text-xs font-bold transition-all active:scale-95"
+                style={pickerTileStyle(activePreset?.id === preset.id)}
+              >
+                {preset.name}
+              </button>
+            ))}
+            <span
+              className="rounded-full border-2 px-3 py-1 text-xs font-bold"
+              style={pickerTileStyle(!activePreset)}
+            >
+              Custom
+            </span>
+          </div>
+        </div>
+
+        <div className="mb-5">
+          <div className="mb-2 flex items-center justify-between text-sm font-bold text-white/80">
+            <span>Operations</span>
+            <span className="text-xs text-white/50">pick at least one</span>
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            {OP_OPTIONS.map((option) => {
+              const active = prefs.ops.includes(option.id);
+              const onlyThisActive = active && prefs.ops.length === 1;
               return (
                 <button
                   key={option.id}
-                  onClick={() => onChange({ gender: option.id })}
-                  className="flex flex-col items-center gap-1 rounded-xl border-2 p-2 transition-all active:scale-95"
-                  style={{
-                    background: active ? 'rgba(250, 204, 21, 0.18)' : 'rgba(255,255,255,0.05)',
-                    borderColor: active ? '#facc15' : 'rgba(255,255,255,0.15)',
-                  }}
+                  onClick={() => toggleOp(option.id)}
+                  disabled={onlyThisActive}
+                  className="flex flex-col items-center gap-1 rounded-xl border-2 p-2 transition-all active:scale-95 disabled:opacity-70"
+                  style={pickerTileStyle(active)}
                 >
-                  <span className="text-2xl">{option.emoji}</span>
-                  <span className="text-xs font-bold">{option.label}</span>
+                  <span className="text-2xl font-bold">{option.label}</span>
+                  <span className="text-[11px] font-bold opacity-80">{option.name}</span>
                 </button>
               );
             })}
           </div>
         </div>
 
-        <div>
-          <div className="mb-2 text-sm font-bold text-white/80">Math difficulty</div>
-          <div className="grid gap-2">
-            {DIFFICULTY_PRESETS.map((level) => {
-              const active = prefs.difficulty === level.id;
-              return (
-                <button
-                  key={level.id}
-                  onClick={() => onChange({ difficulty: level.id })}
-                  className="flex items-center justify-between rounded-xl border-2 px-3 py-2 text-left transition-all active:scale-[0.98]"
-                  style={{
-                    background: active ? 'rgba(250, 204, 21, 0.18)' : 'rgba(255,255,255,0.05)',
-                    borderColor: active ? '#facc15' : 'rgba(255,255,255,0.15)',
-                  }}
-                >
-                  <div>
-                    <div className="text-sm font-bold">{level.name}</div>
-                    <div className="text-xs text-white/60">{level.hint}</div>
-                  </div>
-                  {active && <span className="text-lg">✓</span>}
-                </button>
-              );
-            })}
+        <div className="mb-2">
+          <div className="mb-2 flex items-center justify-between text-sm font-bold text-white/80">
+            <span>Number range</span>
+            <span className="font-mono text-yellow-200">1 – {prefs.maxNumber}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={MIN_RANGE}
+              max={MAX_RANGE}
+              value={prefs.maxNumber}
+              onChange={(event) => onChange({ maxNumber: clampRange(event.target.value) })}
+              className="flex-1 accent-yellow-300"
+            />
+            <input
+              type="number"
+              min={MIN_RANGE}
+              max={MAX_RANGE}
+              value={prefs.maxNumber}
+              onChange={(event) => onChange({ maxNumber: clampRange(event.target.value) })}
+              className="w-20 rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-right text-sm font-bold text-white outline-none focus:border-yellow-300"
+            />
+          </div>
+          <div className="mt-1 text-[11px] text-white/50">
+            Between {MIN_RANGE} and {MAX_RANGE}. Multiplication and division use up to 12 regardless.
           </div>
         </div>
 
-        <p className="mt-4 text-center text-[11px] text-white/45">
-          Preferences saved on this device · v{APP_VERSION}
-        </p>
+        <p className="mt-4 text-center text-[11px] text-white/45">v{APP_VERSION}</p>
       </div>
     </div>
   );
@@ -1828,7 +1965,12 @@ const AuthPanel = ({ configured, user, authMessage, syncStatus, syncMessage, onR
   );
 };
 
-const HomeScreen = ({ equipped, gender, inventoryCount, authPanel, difficulty, onBattle, onInventory, onOpenSettings }) => (
+const HomeScreen = ({ equipped, prefs, inventoryCount, authPanel, onBattle, onInventory, onOpenSettings }) => {
+  const preset = matchPreset(prefs);
+  const opsHint = formatOpsHint(prefs.ops);
+  const difficultyLabel = preset ? preset.name : 'Custom';
+
+  return (
   <div className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-6xl flex-col px-4 py-4 pb-6 sm:px-6">
     <div className="ml-auto w-full max-w-sm">{authPanel}</div>
 
@@ -1856,7 +1998,7 @@ const HomeScreen = ({ equipped, gender, inventoryCount, authPanel, difficulty, o
             className="absolute -bottom-2 left-1/2 h-5 w-36 -translate-x-1/2 rounded-full"
             style={{ background: 'radial-gradient(ellipse, rgba(0,0,0,0.42), transparent 70%)' }}
           />
-          <Avatar equipped={equipped} gender={gender} expression="happy" />
+          <Avatar equipped={equipped} gender={prefs.gender} expression="happy" />
         </div>
 
         <div className="grid w-full max-w-sm gap-4">
@@ -1882,7 +2024,7 @@ const HomeScreen = ({ equipped, gender, inventoryCount, authPanel, difficulty, o
               style={{ background: 'linear-gradient(135deg, #0ea5e9, #14b8a6)' }}
             >
               <span className="text-base">⚙️ Settings</span>
-              <span className="text-[11px] font-normal opacity-80">{difficulty.name} · {difficulty.hint}</span>
+              <span className="text-[11px] font-normal opacity-80">{difficultyLabel} · {opsHint} · to {prefs.maxNumber}</span>
             </button>
           </div>
         </div>
@@ -1914,7 +2056,8 @@ const HomeScreen = ({ equipped, gender, inventoryCount, authPanel, difficulty, o
     </main>
     <div className="mt-2 text-center text-[10px] text-white/40">Math Dungeon v{APP_VERSION}</div>
   </div>
-);
+  );
+};
 
 const LootTeaser = ({ slot, type, color, title }) => (
   <div className="flex items-center gap-3 rounded-2xl border border-white/20 bg-white/10 p-3 text-white shadow-lg backdrop-blur-md">
@@ -2163,9 +2306,7 @@ const RewardScreen = ({ item, opened, onOpen, onClaim }) => {
         <div className="title-font mb-1 text-3xl" style={{ color: colorValue, textShadow: '2px 2px 0 rgba(0,0,0,0.5)' }}>
           {colorName} {item.typeName}
         </div>
-        <div className="rounded-full px-4 py-1 text-sm font-bold text-slate-950" style={{ background: rarity.accent }}>
-          {rarity.name}
-        </div>
+        <RarityBadge rarity={rarity} className="px-4 py-1 text-sm" />
         <div className="mt-2 text-sm font-bold text-white/80">
           {item.motifName || getMotifName(item.motif)} motif · {item.finish || 'magic'} finish
         </div>
@@ -2194,10 +2335,22 @@ const InventoryScreen = ({ inventory, equipped, gender, onEquip, onBack, authPan
     setActiveRarity('all');
   }, [activeSlot]);
 
-  const slotItems = useMemo(
-    () => inventory.filter((item) => item.slot === activeSlot),
-    [inventory, activeSlot],
-  );
+  const bySlot = useMemo(() => {
+    const groups = Object.fromEntries(SLOT_ORDER.map((slot) => [slot, []]));
+    for (const item of inventory) {
+      if (groups[item.slot]) groups[item.slot].push(item);
+    }
+    return groups;
+  }, [inventory]);
+
+  const slotItems = bySlot[activeSlot] || [];
+
+  const rarityCounts = useMemo(() => {
+    const counts = {};
+    for (const item of slotItems) counts[item.rarity] = (counts[item.rarity] || 0) + 1;
+    return counts;
+  }, [slotItems]);
+
   const filtered = useMemo(() => {
     const list = activeRarity === 'all' ? slotItems : slotItems.filter((item) => item.rarity === activeRarity);
     return [...list].sort((a, b) => b.id - a.id);
@@ -2248,7 +2401,7 @@ const InventoryScreen = ({ inventory, equipped, gender, onEquip, onBack, authPan
         <div className="rounded-3xl border-2 border-white/20 bg-black/30 p-4 backdrop-blur">
           <div className="-mx-1 mb-4 flex gap-2 overflow-x-auto px-1 pb-2">
             {SLOT_ORDER.map((slot) => {
-              const count = inventory.filter((item) => item.slot === slot).length;
+              const count = bySlot[slot]?.length || 0;
               const isActive = activeSlot === slot;
               return (
                 <button
@@ -2272,7 +2425,7 @@ const InventoryScreen = ({ inventory, equipped, gender, onEquip, onBack, authPan
           {slotItems.length > 0 && (
             <div className="-mx-1 mb-3 flex flex-wrap gap-1.5 px-1">
               {[{ id: 'all', name: 'All', accent: '#ffffff' }, ...RARITIES].map((r) => {
-                const count = r.id === 'all' ? slotItems.length : slotItems.filter((item) => item.rarity === r.id).length;
+                const count = r.id === 'all' ? slotItems.length : rarityCounts[r.id] || 0;
                 if (r.id !== 'all' && count === 0) return null;
                 const isActive = activeRarity === r.id;
                 return (
@@ -2308,25 +2461,24 @@ const InventoryScreen = ({ inventory, equipped, gender, onEquip, onBack, authPan
               {filtered.map((item) => {
                 const equippedHere = equipped[item.slot]?.id === item.id;
                 const rarity = getRarity(item.rarity);
+                const itemColor = getColorValue(item.color);
                 return (
                   <button
                     key={item.id}
                     onClick={() => onEquip(item)}
                     className="relative rounded-2xl p-2 transition-all"
                     style={{
-                      background: equippedHere ? getColorValue(item.color) : 'rgba(255,255,255,0.08)',
-                      border: equippedHere ? '3px solid white' : `3px solid ${getColorValue(item.color)}`,
+                      background: equippedHere ? itemColor : 'rgba(255,255,255,0.08)',
+                      border: `3px solid ${equippedHere ? '#ffffff' : itemColor}`,
                       transform: equippedHere ? 'scale(1.02)' : 'scale(1)',
-                      boxShadow: equippedHere ? `0 0 0 4px ${rarity.glow}, 0 0 20px ${getColorValue(item.color)}` : `0 0 14px ${rarity.glow}`,
+                      boxShadow: equippedHere ? `0 0 0 4px ${rarity.glow}, 0 0 20px ${itemColor}` : `0 0 14px ${rarity.glow}`,
                     }}
                   >
                     <ItemAvatar item={item} className="mx-auto h-28 w-20" />
                     <div className="mt-1 truncate text-xs font-bold text-white" style={{ textShadow: '1px 1px 0 rgba(0,0,0,0.7)' }}>
                       {item.typeName}
                     </div>
-                    <div className="mx-auto mt-1 w-fit rounded-full px-2 py-0.5 text-[10px] font-bold text-slate-950" style={{ background: rarity.accent }}>
-                      {rarity.name}
-                    </div>
+                    <RarityBadge rarity={rarity} className="mx-auto mt-1" />
                     <div className="mt-1 truncate text-[10px] font-bold text-white/70">
                       {item.motifName || getMotifName(item.motif)} · {item.finish || 'magic'}
                     </div>
