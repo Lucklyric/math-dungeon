@@ -34,7 +34,7 @@ Static catalogs defined at the top of `App.jsx` drive everything:
 Save state = `{ inventory, equipped, nextId }` (`DEFAULT_SAVE`). Persisted two ways:
 
 1. **localStorage** under `STORAGE_KEY = 'math-dungeon-v1'` via `loadGame` / `saveGame` — always active, works offline and for guests.
-2. **Supabase** `public.game_saves` table (schema in `supabase/schema.sql`, RLS keyed to `auth.uid() = user_id`) via `src/lib/supabase.js`. Auth is email magic link (`signInWithOtp`).
+2. **Supabase** `public.game_saves` table (schema in `supabase/migrations/`, RLS keyed to `auth.uid() = user_id`) via `src/lib/supabase.js`. Auth is email magic link (`signInWithOtp`).
 
 The sync effect (around `App.jsx:1115`) runs when `loaded && authReady && user` change: on login it loads the cloud row if present, otherwise upserts the local save to the cloud. Every state mutation goes through `save(inv, eq, id)` which writes localStorage first and then upserts to Supabase if signed in. `isSupabaseConfigured` lets the app degrade gracefully to guest-only mode when env vars are absent.
 
@@ -49,4 +49,4 @@ The sync effect (around `App.jsx:1115`) runs when `loaded && authReady && user` 
 - Styling is Tailwind utility classes inline plus a tiny `src/index.css` (only `@tailwind` directives + a handful of resets). No CSS modules, no component library.
 - Avatars and items are hand-authored inline SVG — when adding a new decoration, extend the relevant `DECORATIONS[slot]` array **and** add a rendering branch to the matching SVG component (e.g. a new hat needs a case in `Hat`).
 - If you add a new equipment slot, update `SLOT_INFO`, `SLOT_ORDER`, `DECORATIONS`, `getSlotForEnemy`, and the `Avatar` composition — these are the coupling points.
-- Schema changes to `game_saves` must be reflected in `normalizeSave`, the `upsert` payloads, and `supabase/schema.sql`. RLS policies are required — don't remove them.
+- Schema changes to `game_saves` must be reflected in `normalizeSave`, the `upsert` payloads, and `supabase/migrations/`. RLS policies are required — don't remove them.

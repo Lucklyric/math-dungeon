@@ -20,7 +20,14 @@ The app still works as a guest game if Supabase auth is unavailable, but signed-
 
 ## Supabase setup
 
-Run [supabase/schema.sql](supabase/schema.sql) in the Supabase SQL editor. It creates `public.game_saves` with Row Level Security so each signed-in player can only read and write their own save.
+The schema lives under [supabase/migrations/](supabase/migrations/) as a single `init_game_saves` migration that creates `public.game_saves` with Row Level Security so each signed-in player can only read and write their own save. Apply it with:
+
+```sh
+npx supabase link --project-ref esalgojhghuonrqoxcqm
+npx supabase db push
+```
+
+Or paste the migration file into the Supabase SQL editor.
 
 ### Auth: email + 6-digit code
 
