@@ -1352,9 +1352,10 @@ export default function MathDungeon() {
       return { ok: false };
     }
 
+    const emailRedirectTo = `${window.location.origin}${import.meta.env.BASE_URL || '/'}`;
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { shouldCreateUser: true },
+      options: { shouldCreateUser: true, emailRedirectTo },
     });
 
     if (error) {
@@ -1918,11 +1919,11 @@ const AuthPanel = ({ configured, user, authMessage, syncStatus, syncMessage, onR
             inputMode="numeric"
             pattern="[0-9]*"
             autoComplete="one-time-code"
-            maxLength={6}
+            maxLength={10}
             value={code}
             onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
-            placeholder="123456"
-            className="min-w-0 flex-1 rounded-xl border border-white/20 bg-white px-3 py-2 text-center text-lg font-bold tracking-[0.4em] text-slate-900 outline-none focus:border-yellow-300"
+            placeholder="code"
+            className="min-w-0 flex-1 rounded-xl border border-white/20 bg-white px-3 py-2 text-center text-lg font-bold tracking-[0.3em] text-slate-900 outline-none focus:border-yellow-300"
           />
           <button
             type="submit"
