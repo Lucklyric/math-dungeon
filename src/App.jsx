@@ -1165,6 +1165,7 @@ export default function MathDungeon() {
 
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
   const [showSettings, setShowSettings] = useState(false);
+  const [conflict, setConflict] = useState(null);
 
   useEffect(() => {
     setPrefs(loadPrefs());
@@ -1301,17 +1302,64 @@ export default function MathDungeon() {
 
       if (data) {
         const cloudSave = normalizeSave(data);
-        setInventory(cloudSave.inventory);
-        setEquipped(cloudSave.equipped);
-        setNextId(cloudSave.nextId);
-        saveGame(cloudSave.inventory, cloudSave.equipped, cloudSave.nextId);
-        if (data.prefs && Object.keys(data.prefs).length > 0) {
-          const cloudPrefs = normalizePrefs(data.prefs);
-          setPrefs(cloudPrefs);
-          savePrefs(cloudPrefs);
+        const cloudPrefsRaw = data.prefs && Object.keys(data.prefs).length > 0 ? normalizePrefs(data.prefs) : null;
+        const localHasItems = inventory.length > 0;
+        const cloudHasItems = cloudSave.inventory.length > 0;
+
+        if (localHasItems && cloudHasItems) {
+          setConflict({
+            local: { inventory, equipped, nextId, prefs },
+            cloud: { ...cloudSave, prefs: cloudPrefsRaw || prefs },
+          });
+          setSyncStatus('conflict');
+          setSyncMessage('Two saves found. Pick which one to keep.');
+          return;
+        }
+
+        if (cloudHasItems) {
+          setInventory(cloudSave.inventory);
+          setEquipped(cloudSave.equipped);
+          setNextId(cloudSave.nextId);
+          saveGame(cloudSave.inventory, cloudSave.equipped, cloudSave.nextId);
+          if (cloudPrefsRaw) {
+            setPrefs(cloudPrefsRaw);
+            savePrefs(cloudPrefsRaw);
+          }
+          setSyncStatus('saved');
+          setSyncMessage('Cloud save loaded.');
+          return;
+        }
+
+        if (localHasItems) {
+          const { error: pushError } = await supabase
+            .from('game_saves')
+            .upsert(
+              {
+                user_id: user.id,
+                inventory,
+                equipped,
+                next_id: nextId,
+                prefs,
+              },
+              { onConflict: 'user_id' },
+            );
+          if (cancelled) return;
+          if (pushError) {
+            setSyncStatus('error');
+            setSyncMessage(pushError.message);
+            return;
+          }
+          setSyncStatus('saved');
+          setSyncMessage('Guest save copied to cloud.');
+          return;
+        }
+
+        if (cloudPrefsRaw) {
+          setPrefs(cloudPrefsRaw);
+          savePrefs(cloudPrefsRaw);
         }
         setSyncStatus('saved');
-        setSyncMessage('Cloud save loaded.');
+        setSyncMessage('Cloud save ready.');
         return;
       }
 
@@ -1345,6 +1393,63 @@ export default function MathDungeon() {
       cancelled = true;
     };
   }, [loaded, authReady, user?.id]);
+
+  const resolveConflict = useCallback(
+    (choice) => {
+      if (!conflict) return;
+      const { local, cloud } = conflict;
+
+      let resolvedInv;
+      let resolvedEq;
+      let resolvedNextId;
+      let resolvedPrefs;
+
+      if (choice === 'local') {
+        resolvedInv = local.inventory;
+        resolvedEq = local.equipped;
+        resolvedNextId = local.nextId;
+        resolvedPrefs = local.prefs;
+      } else if (choice === 'cloud') {
+        resolvedInv = cloud.inventory;
+        resolvedEq = cloud.equipped;
+        resolvedNextId = cloud.nextId;
+        resolvedPrefs = cloud.prefs;
+      } else {
+        const sig = (item) => `${item.slot}|${item.type}|${item.color}|${item.motif}|${item.finish}|${item.rarity}`;
+        const seen = new Set();
+        const merged = [];
+        let id = Math.max(local.nextId, cloud.nextId);
+        for (const item of [...cloud.inventory, ...local.inventory]) {
+          const key = sig(item);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push({ ...item, id: id++ });
+        }
+        const reEquip = (eq) => {
+          const out = {};
+          for (const [slot, item] of Object.entries(eq || {})) {
+            const found = merged.find((m) => sig(m) === sig(item));
+            if (found) out[slot] = found;
+          }
+          return out;
+        };
+        resolvedInv = merged;
+        resolvedEq = { ...reEquip(cloud.equipped), ...reEquip(local.equipped) };
+        resolvedNextId = id;
+        resolvedPrefs = local.prefs;
+      }
+
+      setInventory(resolvedInv);
+      setEquipped(resolvedEq);
+      setNextId(resolvedNextId);
+      setPrefs(resolvedPrefs);
+      savePrefs(resolvedPrefs);
+      saveGame(resolvedInv, resolvedEq, resolvedNextId);
+      save(resolvedInv, resolvedEq, resolvedNextId, resolvedPrefs);
+      setConflict(null);
+    },
+    [conflict, save],
+  );
 
   const requestLoginCode = useCallback(async (email) => {
     if (!supabase) {
@@ -1583,6 +1688,8 @@ export default function MathDungeon() {
         {showSettings && (
           <SettingsModal prefs={prefs} onChange={updatePrefs} onClose={() => setShowSettings(false)} />
         )}
+
+        {conflict && <SaveConflictModal conflict={conflict} onResolve={resolveConflict} />}
       </div>
     </>
   );
@@ -1725,6 +1832,71 @@ const SettingsModal = ({ prefs, onChange, onClose }) => {
         </div>
 
         <p className="mt-4 text-center text-[11px] text-white/45">v{APP_VERSION}</p>
+      </div>
+    </div>
+  );
+};
+
+const SaveConflictModal = ({ conflict, onResolve }) => {
+  const summary = (side) => ({
+    items: side.inventory.length,
+    equipped: Object.keys(side.equipped || {}).length,
+  });
+  const local = summary(conflict.local);
+  const cloud = summary(conflict.cloud);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-3xl border-2 border-white/20 bg-slate-900 p-5 text-white shadow-2xl">
+        <h2 className="title-font mb-1 text-2xl text-yellow-200">Two saves found</h2>
+        <p className="mb-4 text-sm text-white/70">
+          You have items on this device <em>and</em> on this account. Pick which save to keep — the other will be overwritten unless you combine them.
+        </p>
+
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div className="rounded-2xl border-2 border-sky-400/40 bg-sky-500/10 p-3">
+            <div className="text-xs font-bold uppercase tracking-wide text-sky-200">This device</div>
+            <div className="mt-2 text-3xl font-bold">{local.items}</div>
+            <div className="text-xs text-white/60">items</div>
+            <div className="mt-1 text-[11px] text-white/50">{local.equipped} equipped</div>
+          </div>
+          <div className="rounded-2xl border-2 border-purple-400/40 bg-purple-500/10 p-3">
+            <div className="text-xs font-bold uppercase tracking-wide text-purple-200">Cloud account</div>
+            <div className="mt-2 text-3xl font-bold">{cloud.items}</div>
+            <div className="text-xs text-white/60">items</div>
+            <div className="mt-1 text-[11px] text-white/50">{cloud.equipped} equipped</div>
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <button
+            onClick={() => onResolve('combine')}
+            className="chunky-btn rounded-2xl py-3 text-base text-white title-font"
+            style={{ background: 'linear-gradient(135deg, #16a34a, #22c55e)' }}
+          >
+            ✨ Combine both saves
+          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => onResolve('local')}
+              className="chunky-btn rounded-xl py-2 text-sm text-white title-font"
+              style={{ background: 'linear-gradient(135deg, #0284c7, #0ea5e9)' }}
+            >
+              Keep this device
+            </button>
+            <button
+              onClick={() => onResolve('cloud')}
+              className="chunky-btn rounded-xl py-2 text-sm text-white title-font"
+              style={{ background: 'linear-gradient(135deg, #7c3aed, #a855f7)' }}
+            >
+              Keep cloud
+            </button>
+          </div>
+        </div>
+
+        <p className="mt-3 text-center text-[11px] text-white/45">
+          Combine de-duplicates by item type, color, motif, and finish, then re-numbers IDs.
+        </p>
       </div>
     </div>
   );
