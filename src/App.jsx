@@ -1180,8 +1180,16 @@ export default function MathDungeon() {
         if (supabase && user) {
           supabase
             .from('game_saves')
-            .update({ prefs: next })
-            .eq('user_id', user.id)
+            .upsert(
+              {
+                user_id: user.id,
+                inventory,
+                equipped,
+                next_id: nextId,
+                prefs: next,
+              },
+              { onConflict: 'user_id' },
+            )
             .then(({ error }) => {
               if (error) {
                 setSyncStatus('error');
@@ -1192,7 +1200,7 @@ export default function MathDungeon() {
         return next;
       });
     },
-    [user],
+    [user, inventory, equipped, nextId],
   );
 
   useEffect(() => {
@@ -1307,6 +1315,22 @@ export default function MathDungeon() {
         const cloudHasItems = cloudSave.inventory.length > 0;
 
         if (localHasItems && cloudHasItems) {
+          const sameInventory =
+            inventory.length === cloudSave.inventory.length &&
+            JSON.stringify([...inventory].sort((a, b) => a.id - b.id)) ===
+              JSON.stringify([...cloudSave.inventory].sort((a, b) => a.id - b.id));
+          const sameEquipped = JSON.stringify(equipped) === JSON.stringify(cloudSave.equipped);
+
+          if (sameInventory && sameEquipped) {
+            if (cloudPrefsRaw) {
+              setPrefs(cloudPrefsRaw);
+              savePrefs(cloudPrefsRaw);
+            }
+            setSyncStatus('saved');
+            setSyncMessage('Cloud save in sync.');
+            return;
+          }
+
           setConflict({
             local: { inventory, equipped, nextId, prefs },
             cloud: { ...cloudSave, prefs: cloudPrefsRaw || prefs },
@@ -1415,7 +1439,8 @@ export default function MathDungeon() {
         resolvedNextId = cloud.nextId;
         resolvedPrefs = cloud.prefs;
       } else {
-        const sig = (item) => `${item.slot}|${item.type}|${item.color}|${item.motif}|${item.finish}|${item.rarity}`;
+        const sig = (item) =>
+          `${item.slot}|${item.type}|${item.color}|${item.trimColor || ''}|${item.motif}|${item.finish}|${item.rarity}`;
         const seen = new Set();
         const merged = [];
         let id = Math.max(local.nextId, cloud.nextId);
@@ -1494,9 +1519,20 @@ export default function MathDungeon() {
     if (!supabase) return;
     await supabase.auth.signOut();
     setUser(null);
-    setAuthMessage('Signed out.');
+    setInventory([]);
+    setEquipped({});
+    setNextId(1);
+    setPrefs(DEFAULT_PREFS);
+    setConflict(null);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(PREFS_KEY);
+    } catch {
+      // best-effort
+    }
+    setAuthMessage('Signed out. Your account data stays in the cloud.');
     setSyncStatus('local');
-    setSyncMessage('Guest save on this device.');
+    setSyncMessage('Sign in to load your save.');
   }, []);
 
   const startBattle = () => {
